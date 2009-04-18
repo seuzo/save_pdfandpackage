@@ -1,0 +1,349 @@
+(*
+save_PDFandPackage
+ドキュメントのドラッグ＆ドロップでパッケージとPDFを生成します。
+(c)2006-2009 seuzo, www.seuzo.jp
+http://d.hatena.ne.jp/seuzo/20090212/1234403807
+
+History
+2006-01-24	v0.1	とりあえず版
+2006-05-03	v0.2	Indesign CS2用に書き換えました
+2007-09-28	v0.3	InDesign CS3用。ここまで、「save_PDF」「save_Package」としてリリース。
+2009-02-12	v1.0 InDesign CS4用　コードをすべて見直し、savePDFとの統合。ソフトウエア名を「save_PDFandPackage」とした。PDFのみの生成の場合、保存フォルダを選択できるようにした。コード中の設定を変更することで、いくつかのオブションを変更できるようにした。
+2009-02-15	v1.1 ドラッグ＆ドロップでパッケージ時に使用フォント一覧（フォントバージョン付き）レポートを出力できるようにした。
+*)
+--------------------------------------------------------●設定など（グローバル）
+property SHOW_WINDOW : true --ドキュメントを開く時、ウインドウを表示するかどうか
+property PACKAGE_OPT_COPYING_FONTS : true --パッケージに欧文フォントをコピーするかどうか
+property PACKAGE_OPT_COPYING_LINKED_GRAPHICS : true --パッケージにリンク画像をコピーするかどうか
+property PACKAGE_OPT_COPYING_PROFILES : true --パッケージにプロファイルをコピーするかどうか
+property PACKAGE_OPT_INCLUDE_HIDDEN_DAYERS : true --パッケージに非表示レイヤーに含まれたフォントや画像をコピーするかどうか
+property PACKAGE_OPT_UPDATING_GRAPHICS : true --パッケージ時に画像の再リンクをするかどうか
+property PACKAGE_OPT_CREATING_REPORT : true --パッケージに出力レポートを添付するかどうか
+property FONTS_REPORT : true --パッケージ時に使用フォント一覧レポートを出力するかどうか
+
+
+
+--------------------------------------------------------●ドラッグ＆ドロップされた
+on open of theFiles
+	set {save_package_folder, save_pdf_folder, pdf_export_presets} to my preparation() --前準備
+	
+	--ファイルのフィルタリング
+	set my_files to my file_kind({"ind", "indd"}, {"IDd5", "IDd6"}, theFiles) --InDesign CS4のファイルタイプはなぜか"IDd5"
+	
+	--フォントレポート
+	if (save_package_folder is not false) and FONTS_REPORT then
+		set return to ASCII character 10 --LF改行
+		set my_fonts to "" as Unicode text --使用フォントテキスト
+		set ind_ver to (("▼InDesignバージョン" & return) as Unicode text) & my ver() & return & return
+		set my_docs to (("▼検査ドキュメント" & return) as Unicode text)
+		set h to ("▼使用フォント一覧" & return & "フォント名\tPS名\tタイプ\tバージョン" & return) as Unicode text
+	end if
+	
+	--ファイルを開いて、コントロールルーチンへ
+	repeat with i in my_files
+		tell application "Adobe InDesign CS4"
+			set user interaction level of script preferences to never interact --ユーザー操作を禁止します
+			try
+				open i showing window SHOW_WINDOW
+			on error errMsg number errNum
+				set user interaction level of script preferences to interact with all --ユーザー操作の再開
+				my my_error("誤りが起きました；" & i & return & "処理を中断しますか？" & return & errMsg & return & errNum, false)
+			end try
+			set user interaction level of script preferences to interact with all --ユーザー操作の再開
+			if (save_package_folder is not false) and FONTS_REPORT then
+				set my_docs to (my_docs & (full name of document 1) as Unicode text) & return
+				set my_fonts to my_fonts & my use_fonts() --使用フォントの収集
+			end if
+			set doc_name to (name of document 1) as Unicode text
+			set doc_name to do shell script "echo '" & doc_name & "' | sed -e 's/\\.indd$//;'" --拡張子を取る
+			if save_pdf_folder is false then set save_pdf_folder to (file path of document 1) as Unicode text ----InDesignドキュメント直下に作成するときは、ドキュメントのコンテナフォルダ
+			my control_routin(save_package_folder, save_pdf_folder, doc_name, pdf_export_presets)
+			close document 1 saving no
+		end tell
+	end repeat
+	
+	--フォントレポート書き出し
+	if (save_package_folder is not false) and FONTS_REPORT then
+		set my_fonts to do shell script "echo " & quoted form of my_fonts & "| sort -u" --ソートして重複行を削除
+		set my_fonts to ((current date) as Unicode text) & return & return & ind_ver & return & my_docs & return & h & my_fonts
+		my write_file(my_fonts, (save_package_folder as Unicode text) & "fonts_report.txt") --ファイルの書き出し
+	end if
+	----終了の合図
+	say "Work was finished. " & (length of my_files) & " files were processed."
+end open
+
+--------------------------------------------------------●直接起動
+on run
+	my doc_exists()
+	set {save_package_folder, save_pdf_folder, pdf_export_presets} to my preparation() --前準備
+	tell application "Adobe InDesign CS4"
+		set doc_name to (name of document 1) as Unicode text
+		set doc_name to do shell script "echo '" & doc_name & "' | sed -e 's/\\.indd$//;'"
+		if save_pdf_folder is false then set save_pdf_folder to (file path of document 1) as Unicode text ----InDesignドキュメント直下に作成するときは、ドキュメントのコンテナフォルダ
+	end tell
+	my control_routin(save_package_folder, save_pdf_folder, doc_name, pdf_export_presets)
+	--終了の合図
+	say "Work was finished. "
+end run
+
+--------------------------------------------------------○準備（処理動作の設定）
+to preparation()
+	my ver() --バージョン確認
+	
+	set save_package_folder to false --パッケージを作らないときはfalse
+	set pdf_export_presets to false --PDFを作らないときはfalse
+	set save_pdf_folder to false --PDFをひとつのフォルダに一括保存しない時はfalse
+	
+	set pdf_f to button returned of (display dialog ("処理を選んでください") buttons {"パッケージのみ", "パッケージとPDF", "PDFのみ"} default button 3 with icon 1)
+	if pdf_f = "パッケージのみ" then
+		set save_package_folder to my choose_folder("パッケージのフォルダを保存するフォルダを選択してください")
+	else if pdf_f = "パッケージとPDF" then
+		set save_package_folder to my choose_folder("パッケージのフォルダを保存するフォルダを選択してください")
+		set pdf_export_presets to my pdf_style() --書き出しPDFスタイルを選択する
+	else -- "PDFのみ"
+		try
+			set save_pdf_folder to my choose_folder("PDFを保存するフォルダを選択してください" & return & "ドキュメント直下に作成する場合は「キャンセル」を選んでください")
+		on error errMsg number errNum --キャンセルをクリックしても終了しない
+			set save_pdf_folder to false
+		end try
+		set pdf_export_presets to my pdf_style() --書き出しPDFスタイルを選択する
+	end if
+	return {save_package_folder, save_pdf_folder, pdf_export_presets}
+end preparation
+
+--------------------------------------------------------●コントロールルーチン（ひとつづつのドキュメントに対して）
+to control_routin(save_package_folder, save_pdf_folder, doc_name, pdf_export_presets)
+	if save_package_folder is not false then
+		
+		
+		tell application "Finder"
+			try
+				set save_package_folder to make new folder at save_package_folder with properties {name:doc_name}
+			on error errMsg number errNum
+				my my_error("誤りが起きました（make new Folder）；" & save_package_folder & return & "処理を中断しますか？" & return & errMsg & return & errNum, false)
+				return
+			end try
+		end tell
+		my save_Package(save_package_folder as Unicode text, false)
+		try
+			if pdf_export_presets is not false then
+				set save_PDF_path to "" & save_package_folder & doc_name & ".pdf"
+				my save_PDF(save_PDF_path, pdf_export_presets)
+			end if
+		on error errMsg number errNum
+			my my_error("誤りが起きました（Package or PDF）；" & doc_name & return & "処理を中断しますか？" & return & errMsg & return & errNum, false)
+		end try
+	else --PDFのみを生成
+		try
+			set save_PDF_path to "" & save_pdf_folder & doc_name & ".pdf"
+			my save_PDF(save_PDF_path, pdf_export_presets)
+		on error errMsg number errNum
+			my my_error("誤りが起きました（PDF）；" & doc_name & return & "処理を中断しますか？" & return & errMsg & return & errNum, false)
+		end try
+	end if
+end control_routin
+
+
+--------------------------------------------------------●InDesignバージョン確認ルーチン
+to ver()
+	tell application "Adobe InDesign CS4"
+		set my_version to (version of script preferences) as real
+		if my_version < 6 or my_version > 6.9 then
+			activate
+			my my_error("このプログラムはInDesign CS4以外では動作しません", true)
+		end if
+		return version
+	end tell
+end ver
+
+--------------------------------------------------------●パッケージのフォルダまたはPDFを保存するフォルダを選択
+to choose_folder(my_mess)
+	set save_package_folder to choose folder with prompt (my_mess)
+	return (save_package_folder as Unicode text)
+end choose_folder
+
+--------------------------------------------------------●書き出しPDFスタイルを選択する
+to pdf_style()
+	tell application "Adobe InDesign CS4"
+		set pdf_export_presets to name of PDF export presets
+		set pdf_export_presets to choose from list pdf_export_presets with prompt ("PDF書き出しプリセットを選んでください")
+	end tell
+	if pdf_export_presets = false then my my_error("処理を中止します", true)
+	return pdf_export_presets as Unicode text
+end pdf_style
+
+
+--------------------------------------------------------●ドキュメントが開かれているかどうか
+to doc_exists()
+	tell application "Adobe InDesign CS4"
+		if not (exists document 1) then
+			activate
+			my my_error("ドキュメントが開かれていません", true)
+		end if
+	end tell
+end doc_exists
+
+
+
+----------------------------------------------●必要なファイルだけをフィルタして返します
+to file_kind(extention_list, type_list, theFiles)
+	set my_files to {}
+	set extention_list to my conv_unicode(extention_list)
+	set type_list to my conv_unicode(type_list)
+	
+	ignoring case
+		tell application "Finder"
+			repeat with i in theFiles
+				if extention_list contains ((name extension of i) as Unicode text) then
+					set end of my_files to contents of i
+				else if (kind of i) is "フォルダ" as Unicode text then
+					--activate
+					--display dialog "フォルダ「" & (name of i) & "」の中の全ファイルを処理します" buttons {"キャンセル", "OK"} default button 2 with icon 0
+					set my_files to my_files & my file_kind(extention_list, type_list, every file in folder i)
+				else if type_list contains ((file type of i) as Unicode text) then
+					set end of my_files to contents of i
+				else
+					--activate
+					--display dialog "ファイル「" & (name of i) & "」は処理ファイルとして不適当です" buttons {"キャンセル", "OK"} default button 2 with icon 0
+				end if
+			end repeat
+		end tell
+	end ignoring
+	return my_files
+end file_kind
+
+
+--------------------------------------------------------●パッケージをsaveする
+to save_Package(save_package_folder, preflight_errors)
+	set save_package_folder to save_package_folder as string --濁音、半濁音のための苦肉な処理
+	set save_package_folder to save_package_folder as Unicode text
+	
+	tell application "Adobe InDesign CS4"
+		--set succeeded to package document 1 to save_package_folder ignore preflight errors preflight_errors with copying fonts, copying linked graphics, copying profiles, include hidden layers, updating graphics and creating report--以前の設定
+		--ignore preflight errors以外のオプションは最上部でpropertyに設定した
+		set succeeded to package document 1 to save_package_folder ignore preflight errors preflight_errors copying fonts PACKAGE_OPT_COPYING_FONTS copying linked graphics PACKAGE_OPT_COPYING_LINKED_GRAPHICS copying profiles PACKAGE_OPT_COPYING_PROFILES including hidden layers PACKAGE_OPT_INCLUDE_HIDDEN_DAYERS updating graphics PACKAGE_OPT_UPDATING_GRAPHICS creating report PACKAGE_OPT_CREATING_REPORT
+		if succeeded is false then
+			set ANS to button returned of (display dialog (save_package_folder & "はプリフライトエラーです。続行しますか？" as Unicode text) buttons {"キャンセル", "パスする", "パッケージ"} with icon 0)
+			if ANS is "パッケージ" then my save_Package(save_package_folder, true)
+		end if
+	end tell
+end save_Package
+
+
+--------------------------------------------------------●PDFをsaveする
+to save_PDF(save_PDF_path, pdf_export_presets)
+	set save_PDF_path to save_PDF_path as Unicode text
+	--すでに同名のファイルが存在するときは、ファイル名を代えて再帰処理
+	tell application "Finder"
+		if (exists save_PDF_path) then
+			set save_PDF_path to do shell script "echo '" & save_PDF_path & "' | sed -e 's/\\.pdf$/_new.pdf/;'"
+			my save_PDF(save_PDF_path, pdf_export_presets)
+		end if
+	end tell
+	
+	tell application "Adobe InDesign CS4"
+		set page range of PDF export preferences to all pages --すべてのページを書き出す
+		with timeout of 3600 seconds
+			export document 1 format PDF type to save_PDF_path using PDF export preset pdf_export_presets
+		end timeout
+	end tell
+end save_PDF
+
+--------------------------------------------------------●使用フォント一覧を返す
+to use_fonts()
+	set tmp_str to "" as Unicode text
+	tell application "Adobe InDesign CS4"
+		tell document 1
+			repeat with i in every font
+				set i to object reference of i
+				set full_name to (full name native of i) as Unicode text
+				set ps_name to (PostScript name of i) as Unicode text
+				set font_type to font type of i
+				if font_type = OpenType CID then --フォントタイプがテキストに変換できないことがある（バグくさい）
+					set font_type to "OpenType CID"
+				else if font_type = TrueType then
+					set font_type to "TrueType"
+				else if font_type = type 1 then
+					set font_type to "type 1"
+				else if font_type = CID then
+					set font_type to "CID"
+				else if font_type = ATC then
+					set font_type to "ATC"
+				else if font_type = bitmap then
+					set font_type to "bitmap"
+				else if font_type = OCF then
+					set font_type to "OCF"
+				else if font_type = OpenType CFF then
+					set font_type to "OpenType CFF"
+				else if font_type = OpenType TT then
+					set font_type to "OpenType TT"
+				else
+					set font_type to font_type as Unicode text
+				end if
+				
+				set v to (version of i) as Unicode text
+				set tmp_str to tmp_str & full_name & tab & ps_name & tab & font_type & tab & v & return
+			end repeat
+		end tell
+	end tell
+	return tmp_str
+end use_fonts
+
+------------------------------------------★ファイル書き出し
+to write_file(str, my_file)
+	tell application "Finder"
+		set FH to open for access my_file with write permission
+		try
+			set eof FH to 0
+			write ((ASCII character 254) & (ASCII character 255)) to FH --BOMを書き込む
+			write str to FH as Unicode text
+			--write str to FH
+		on error errMsg number errNo
+			close access FH
+			my my_error("書き込み時のエラーです" & return & errMsg & errNo, true)
+		end try
+		close access FH
+		--update my_file
+	end tell
+end write_file
+
+
+
+----------------------------------●置換
+to as_replace(theText, orgStr, newStr)
+	set oldDelim to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to orgStr
+	set tmpList to every text item of theText
+	set AppleScript's text item delimiters to newStr
+	set tmpStr to tmpList as text
+	set AppleScript's text item delimiters to oldDelim
+	return tmpStr
+end as_replace
+
+----------------------------------●リストの項目をunicode textにする
+to conv_unicode(tmp_list)
+	repeat with i in tmp_list
+		set contents of i to (contents of i) as Unicode text
+	end repeat
+	return tmp_list
+end conv_unicode
+
+----------------------------------●エラー処理
+on my_error(err_str, my_stop)
+	set err_str to err_str as Unicode text
+	if my_stop then
+		set my_stop to {"中止"}
+	else
+		set my_stop to {"中止", "続行"}
+	end if
+	tell application "Adobe InDesign CS4"
+		activate
+		beep
+		set ANS to button returned of (display dialog err_str buttons my_stop with icon 0) --警告ダイアログ出してストップ
+		if ANS is "中止" then
+			set user interaction level of script preferences to interact with all --ユーザー操作の再開
+			error number -128
+		end if
+	end tell
+end my_error
+
